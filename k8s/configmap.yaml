@@ -1,0 +1,49 @@
+# ConfigMap that injects config.yaml into every pod.
+# The Secrets (API keys) are kept separate and mounted as env vars.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telegram-sorter-config
+  namespace: telegram-sorter
+data:
+  config.yaml: |
+    telegram:
+      api_id: ${TELEGRAM_API_ID}
+      api_hash: ${TELEGRAM_API_HASH}
+      bot_token: ${TELEGRAM_BOT_TOKEN}
+      session_string: ${TELEGRAM_SESSION_STRING}
+      source_channel: "stranaua"
+
+    openai:
+      api_key: ${OPENAI_API_KEY}
+      model: "gpt-4o-mini"
+      temperature: 0.1
+      max_tokens: 150
+
+    redis:
+      url: "redis://redis:6379"
+      messages_stream: "telegram:messages"
+      classified_stream: "telegram:classified"
+      consumer_group: "sorter"
+      block_ms: 5000
+
+    categories:
+      - name: "Politics"
+        description: >
+          Political news, government decisions, elections, war updates,
+          military operations, international relations, diplomacy,
+          sanctions, legislation, political figures and statements.
+        channel_id: "PLACEHOLDER_POLITICS_CHANNEL_ID"
+
+      - name: "Finance"
+        description: >
+          Financial markets, economy, business news, stocks, banking,
+          currency exchange rates, investments, trade, economic indicators,
+          corporate news, budgets, taxes, energy prices.
+        channel_id: "PLACEHOLDER_FINANCE_CHANNEL_ID"
+
+    classification:
+      confidence_threshold: 0.70
+      fallback_category: "Uncategorized"
+      uncategorized_channel_id: "PLACEHOLDER_UNCATEGORIZED_CHANNEL_ID"
+

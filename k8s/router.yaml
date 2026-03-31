@@ -1,0 +1,46 @@
+# Router — can be scaled; each pod reads from Redis and posts via Bot API.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router
+  namespace: telegram-sorter
+  labels:
+    app: router
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: router
+  template:
+    metadata:
+      labels:
+        app: router
+    spec:
+      containers:
+        - name: router
+          image: YOUR_REGISTRY/telegram-sorter:latest
+          imagePullPolicy: Always
+          env:
+            - name: SERVICE
+              value: "router"
+            - name: REDIS_URL
+              value: "redis://redis:6379"
+          envFrom:
+            - secretRef:
+                name: telegram-sorter-secrets
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+      volumes:
+        - name: config
+          configMap:
+            name: telegram-sorter-config
+

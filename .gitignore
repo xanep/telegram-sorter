@@ -1,0 +1,25 @@
+# Secrets — NEVER commit these
+.env
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# K8s secret file (only the template is committed)
+k8s/secret.yaml
+

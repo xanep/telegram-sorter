@@ -1,0 +1,60 @@
+# ============================================================
+# Telegram Sorter — Application Configuration
+#
+# All secrets are injected via environment variables using the
+# ${VAR_NAME} or ${VAR_NAME:-default} syntax.
+# Set them in .env (local) or as K8s Secrets (production).
+# ============================================================
+
+telegram:
+  api_id: ${TELEGRAM_API_ID}
+  api_hash: ${TELEGRAM_API_HASH}
+  bot_token: ${TELEGRAM_BOT_TOKEN}
+  # Generated once by: python scripts/setup_session.py
+  # Set TELEGRAM_SESSION_STRING in .env before running.
+  session_string: ${TELEGRAM_SESSION_STRING}
+  # Public username of the channel to monitor (without @)
+  source_channel: "stranaua"
+
+openai:
+  api_key: ${OPENAI_API_KEY}
+  model: "gpt-4o-mini"
+  # Low temperature = more deterministic category decisions
+  temperature: 0.1
+  max_tokens: 150
+
+redis:
+  url: ${REDIS_URL:-redis://localhost:6380}
+  messages_stream: "telegram:messages"
+  classified_stream: "telegram:classified"
+  consumer_group: "sorter"
+  # How long to block waiting for new stream entries (ms)
+  block_ms: 5000
+
+# -------------------------------------------------------
+# Categories — add / remove freely, then rebuild the pods.
+# channel_id: numeric ID (e.g. -1001234567890) or @username
+#             of the destination Telegram channel.
+#             The bot must be admin there with "Post Messages".
+# -------------------------------------------------------
+categories:
+  - name: "Ukraine"
+    description: >
+      Ukrainian internal politics, Ukraine war updates,
+      Life in Ukraine, Anything that may be interesting to people living in Ukraine.
+    channel_id: "-1003827611915"
+
+  - name: "World"
+    description: >
+      International Politics, Financial markets, International Economy, Ukrainian news related to international relations,
+      Anything interesting to Ukrainian diaspora.
+    channel_id: "-1003735527506"
+
+classification:
+  # Minimum confidence to accept a category (0.0–1.0).
+  # Messages below this threshold go to the uncategorized channel.
+  confidence_threshold: 0.70
+  fallback_category: "Ukraine"
+  # Leave as PLACEHOLDER if you don't want an uncategorized channel.
+  uncategorized_channel_id: "PLACEHOLDER_UNCATEGORIZED_CHANNEL_ID"
+

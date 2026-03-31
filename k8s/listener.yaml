@@ -1,0 +1,52 @@
+# Listener — exactly 1 replica (Telethon session is stateful)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: listener
+  namespace: telegram-sorter
+  labels:
+    app: listener
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: listener
+  template:
+    metadata:
+      labels:
+        app: listener
+    spec:
+      containers:
+        - name: listener
+          image: YOUR_REGISTRY/telegram-sorter:latest
+          imagePullPolicy: Always
+          env:
+            - name: SERVICE
+              value: "listener"
+            - name: REDIS_URL
+              value: "redis://redis:6379"
+          envFrom:
+            - secretRef:
+                name: telegram-sorter-secrets
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          # Restart if the process hangs (Telethon keepalive)
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import sys; sys.exit(0)"]
+            initialDelaySeconds: 30
+            periodSeconds: 60
+      volumes:
+        - name: config
+          configMap:
+            name: telegram-sorter-config
+
