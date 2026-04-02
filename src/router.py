@@ -44,7 +44,7 @@ class RouterService:
     def _resolve_channel(self, category: str) -> CategoryConfig | None:
         return self.config.category_map.get(category)
 
-    async def _forward(self, target_channel_id: str, message_id: int) -> bool:
+    async def _forward(self, target_channel_id: str, message_ids: list[int]) -> bool:
         try:
             # Convert numeric string IDs (e.g. "-1003827611915") to int so
             # Telethon can resolve them; @usernames are kept as strings.
@@ -55,7 +55,7 @@ class RouterService:
 
             await self.client.forward_messages(
                 entity=dest,
-                messages=message_id,
+                messages=message_ids,   # list → forwards all album parts at once
                 from_peer=self._source_entity,
                 drop_author=True,
             )
@@ -81,26 +81,30 @@ class RouterService:
 
         async for _redis_id, payload in self._queue.consume(self.config.redis.block_ms):
             category: str = payload["category"]
-            message_id: int = payload["message_id"]
+            message_ids: list[int] = payload["message_ids"]
 
             cat_cfg = self._resolve_channel(category)
 
             if cat_cfg is not None and cat_cfg.is_configured:
-                ok = await self._forward(cat_cfg.channel_id, message_id)
+                ok = await self._forward(cat_cfg.channel_id, message_ids)
                 if ok:
                     logger.info(
-                        "Routed msg=%d  →  %s (%s)", message_id, category, cat_cfg.channel_id
+                        "Routed %d msg(s) %s  →  %s (%s)",
+                        len(message_ids), message_ids, category, cat_cfg.channel_id,
                     )
             else:
                 unc_id = self.config.classification.uncategorized_channel_id
                 if self.config.classification.uncategorized_is_configured:
-                    ok = await self._forward(unc_id, message_id)
+                    ok = await self._forward(unc_id, message_ids)
                     if ok:
-                        logger.info("Routed msg=%d  →  Uncategorized (%s)", message_id, unc_id)
+                        logger.info(
+                            "Routed %d msg(s) %s  →  Uncategorized (%s)",
+                            len(message_ids), message_ids, unc_id,
+                        )
                 else:
                     logger.warning(
-                        "No channel configured for category '%s'; msg=%d dropped.",
-                        category, message_id,
+                        "No channel configured for category '%s'; msg=%s dropped.",
+                        category, message_ids,
                     )
 
     async def close(self) -> None:

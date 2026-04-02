@@ -133,7 +133,7 @@ class ClassifierService:
                 )
 
             classified = {
-                "message_id": payload["message_id"],
+                "message_ids": payload["message_ids"],
                 "chat_id": payload["chat_id"],
                 "category": category,
                 "confidence": confidence,
@@ -142,6 +142,6 @@ class ClassifierService:
             await self._out.push(classified)
             logger.info(
                 "msg=%s  →  %s  (confidence=%.2f)  reason: %s",
-                payload["message_id"], category, confidence, reason,
+                payload["message_ids"], category, confidence, reason,
             )
 

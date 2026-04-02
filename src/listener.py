@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -35,6 +36,28 @@ def _media_type(media: object) -> str | None:
     return type(media).__name__
 
 
+def _group_by_album(msgs: list) -> list[list]:
+    """
+    Group a chronologically-ordered list of messages by ``grouped_id``.
+
+    Single messages become a one-element group.  Album parts (same
+    ``grouped_id``) are collected into one group while preserving the
+    overall chronological position of the album's first part.
+    """
+    groups: list[list] = []
+    seen: dict[int, list] = {}
+    for msg in msgs:
+        if msg.grouped_id:
+            if msg.grouped_id not in seen:
+                group: list = []
+                seen[msg.grouped_id] = group
+                groups.append(group)
+            seen[msg.grouped_id].append(msg)
+        else:
+            groups.append([msg])
+    return groups
+
+
 class ListenerService:
     """
     Connects to Telegram as a **user account** via Telethon.
@@ -53,6 +76,9 @@ class ListenerService:
     enqueued a second time by the real-time handler.
     """
 
+    # How long to wait for more parts of an album before flushing (seconds).
+    _ALBUM_FLUSH_DELAY: float = 1.0
+
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         session = StringSession(config.telegram.session_string or None)
@@ -69,6 +95,10 @@ class ListenerService:
         self.state = RedisState(url=config.redis.url)
         # In-memory dedup set — prevents double-push during catch-up / live overlap
         self._pushed_ids: set[int] = set()
+        # Album grouping for real-time events: grouped_id → buffered messages
+        self._album_buffer: dict[int, list] = {}
+        # Pending flush tasks: grouped_id → asyncio.Task
+        self._album_tasks: dict[int, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -96,7 +126,18 @@ class ListenerService:
         # missed during the (potentially slow) historical fetch.
         @self.client.on(events.NewMessage(chats=source_entity))
         async def _on_new_message(event: events.NewMessage.Event) -> None:
-            await self._push_msg(event.message, source_entity.id)
+            msg = event.message
+            if msg.grouped_id:
+                # Buffer album parts and flush after a short delay
+                self._album_buffer.setdefault(msg.grouped_id, []).append(msg)
+                existing = self._album_tasks.pop(msg.grouped_id, None)
+                if existing:
+                    existing.cancel()
+                self._album_tasks[msg.grouped_id] = asyncio.ensure_future(
+                    self._flush_album(msg.grouped_id, source_entity.id)
+                )
+            else:
+                await self._push_group([msg], source_entity.id)
 
         # Catch-up: process any messages from the last 24 h we might have missed
         await self._catchup(source_entity)
@@ -142,11 +183,15 @@ class ListenerService:
             logger.info("Catch-up: nothing to do — no missed messages found.")
             return
 
-        # Step 4 — reverse to chronological order, then push
+        # Step 4 — reverse to chronological order, then group albums and push
         missed.reverse()
-        logger.info("Catch-up: pushing %d missed message(s) in chronological order.", len(missed))
-        for msg in missed:
-            await self._push_msg(msg, source_entity.id)
+        groups = _group_by_album(missed)
+        logger.info(
+            "Catch-up: pushing %d group(s) from %d missed message(s) in chronological order.",
+            len(groups), len(missed),
+        )
+        for group in groups:
+            await self._push_group(group, source_entity.id)
         logger.info("Catch-up complete.")
 
     async def _last_id_from_channels(self) -> int | None:
@@ -191,30 +236,44 @@ class ListenerService:
         return max_id
 
     # ------------------------------------------------------------------
-    # Shared push helper
+    # Push helpers
     # ------------------------------------------------------------------
 
-    async def _push_msg(self, msg, source_chat_id: int) -> None:
-        """Serialize a Telethon Message and push it to the Redis Stream."""
-        if msg.id in self._pushed_ids:
-            logger.debug("Skipping already-pushed msg id=%d", msg.id)
+    async def _flush_album(self, grouped_id: int, source_chat_id: int) -> None:
+        """Wait briefly for all album parts to arrive, then push as one group."""
+        await asyncio.sleep(self._ALBUM_FLUSH_DELAY)
+        msgs = self._album_buffer.pop(grouped_id, [])
+        self._album_tasks.pop(grouped_id, None)
+        if msgs:
+            msgs.sort(key=lambda m: m.id)
+            await self._push_group(msgs, source_chat_id)
+
+    async def _push_group(self, msgs: list, source_chat_id: int) -> None:
+        """Serialize a group of messages (1 or more) and push as one queue entry."""
+        new_msgs = [m for m in msgs if m.id not in self._pushed_ids]
+        if not new_msgs:
+            logger.debug("Skipping already-pushed group ids=%s", [m.id for m in msgs])
             return
 
-        text: str = msg.raw_text or ""
+        # Combine text from all parts (caption is usually only on one of them)
+        text: str = " ".join(m.raw_text for m in new_msgs if m.raw_text).strip()
+        message_ids = [m.id for m in new_msgs]
+        first = new_msgs[0]
         payload = {
-            "message_id": msg.id,
+            "message_ids": message_ids,
             "chat_id": source_chat_id,
             "text": text,
-            "date": msg.date.isoformat(),
-            "has_media": msg.media is not None,
-            "media_type": _media_type(msg.media),
+            "date": first.date.isoformat(),
+            "has_media": any(m.media is not None for m in new_msgs),
+            "media_type": _media_type(first.media),
         }
         await self.queue.push(payload)
-        # Update the persistent high-watermark so restarts know where to resume
-        await self.state.set_max(LAST_PROCESSED_KEY, msg.id)
-        self._pushed_ids.add(msg.id)
+        # Update high-watermark to the highest ID in the group
+        await self.state.set_max(LAST_PROCESSED_KEY, max(message_ids))
+        for m in new_msgs:
+            self._pushed_ids.add(m.id)
         logger.info(
-            "Queued msg id=%d  date=%s  has_media=%s  text_len=%d",
-            msg.id, msg.date.date(), payload["has_media"], len(text),
+            "Queued %d msg(s) ids=%s  date=%s  has_media=%s  text_len=%d",
+            len(new_msgs), message_ids, first.date.date(), payload["has_media"], len(text),
         )
 
