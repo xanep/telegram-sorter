@@ -122,8 +122,13 @@ class ListenerService:
             source_entity.id,
         )
 
-        # Register the real-time handler BEFORE catch-up so no live message is
-        # missed during the (potentially slow) historical fetch.
+        # Catch-up FIRST so historical messages are pushed in chronological order
+        # before any live events enter the queue.  Registering the handler
+        # afterwards introduces only a millisecond-scale gap; anything that
+        # slips through will be caught by the high-watermark on next restart.
+        await self._catchup(source_entity)
+
+        # Register the real-time handler only after catch-up is complete.
         @self.client.on(events.NewMessage(chats=source_entity))
         async def _on_new_message(event: events.NewMessage.Event) -> None:
             msg = event.message
@@ -138,9 +143,6 @@ class ListenerService:
                 )
             else:
                 await self._push_group([msg], source_entity.id)
-
-        # Catch-up: process any messages from the last 24 h we might have missed
-        await self._catchup(source_entity)
 
         logger.info("Real-time listener active for @%s", self.config.telegram.source_channel)
         await self.client.run_until_disconnected()
