@@ -62,8 +62,9 @@ class SourceEntry:
 class DestEntry:
     dest_msg_id: int
     text: str
-    date: object
+    date: object                       # when it was posted to the destination
     source_msg_id: int | None = None   # filled in after matching
+    source_date: object | None = None  # when it was originally posted in source
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +141,7 @@ async def check_channel(
             no_match += 1
             continue
         e.source_msg_id = src.msg_id
+        e.source_date = src.date
         matched.append(e)
 
     print(
@@ -162,15 +164,23 @@ async def check_channel(
 
     if out_of_order:
         print(f"\n  ❌  FAIL — {len(out_of_order)} out-of-order pair(s):\n")
+        print(
+            f"  {'pos':>3}  {'dest_id':>7}  {'src_id':>7}"
+            f"  {'src posted (original)':^21}  {'dest posted (forwarded)':^21}"
+        )
+        print(f"  {'-'*3}  {'-'*7}  {'-'*7}  {'-'*21}  {'-'*21}")
         for pos, prev, curr in out_of_order:
-            print(
-                f"     position {pos:>3}:  "
-                f"dest={prev.dest_msg_id} → src={prev.source_msg_id}"
-                f"  ({prev.date:%Y-%m-%d %H:%M})"
-                f"\n               followed by  "
-                f"dest={curr.dest_msg_id} → src={curr.source_msg_id}"
-                f"  ({curr.date:%Y-%m-%d %H:%M})"
-            )
+            for label, e in [("→", prev), ("↳", curr)]:
+                print(
+                    f"  {label:>3}  {e.dest_msg_id:>7}  {e.source_msg_id:>7}"
+                    f"  {e.source_date:%Y-%m-%d %H:%M:%S}    "
+                    f"  {e.date:%Y-%m-%d %H:%M:%S}"
+                )
+            print()
+        print(
+            "  Proof hint: if 'src posted' for the ↳ row is close to the\n"
+            "  catch-up time, it was a live message that jumped the queue."
+        )
         return False
 
     first, last = matched[0], matched[-1]
