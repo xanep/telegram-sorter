@@ -133,6 +133,7 @@ class ClassifierService:
                 )
 
             classified = {
+                "seq": payload.get("seq", 0),
                 "message_ids": payload["message_ids"],
                 "chat_id": payload["chat_id"],
                 "category": category,

@@ -75,6 +75,31 @@ class RedisQueue:
     # Consumer
     # ------------------------------------------------------------------
 
+    async def read_one(self, timeout_ms: int = 5000) -> dict | None:
+        """
+        Read and acknowledge exactly one message from the stream.
+
+        Returns the payload dict, or ``None`` if the call timed out with no
+        new messages.  Unlike ``consume()``, this lets the caller run its own
+        loop and perform periodic work (e.g. gap-timeout checks) between reads.
+        """
+        entries = await self._client.xreadgroup(
+            groupname=self.group,
+            consumername=self.consumer_name,
+            streams={self.stream: ">"},
+            count=1,
+            block=timeout_ms,
+        )
+        if not entries:
+            return None
+        for _stream_name, messages in entries:
+            for redis_msg_id, fields in messages:
+                payload: dict = json.loads(fields["data"])
+                await self._client.xack(self.stream, self.group, redis_msg_id)
+                logger.debug("Read+acked %s from %s", redis_msg_id, self.stream)
+                return payload
+        return None
+
     async def consume(self, block_ms: int = 5000) -> AsyncIterator[tuple[str, dict]]:
         """
         Yield ``(redis_msg_id, payload_dict)`` for each new message.

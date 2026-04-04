@@ -99,6 +99,8 @@ class ListenerService:
         self._album_buffer: dict[int, list] = {}
         # Pending flush tasks: grouped_id → asyncio.Task
         self._album_tasks: dict[int, asyncio.Task] = {}
+        # Monotonic push counter — lets the router enforce delivery order
+        self._seq: int = 0
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -262,6 +264,7 @@ class ListenerService:
         message_ids = [m.id for m in new_msgs]
         first = new_msgs[0]
         payload = {
+            "seq": self._seq,
             "message_ids": message_ids,
             "chat_id": source_chat_id,
             "text": text,
@@ -275,7 +278,8 @@ class ListenerService:
         for m in new_msgs:
             self._pushed_ids.add(m.id)
         logger.info(
-            "Queued %d msg(s) ids=%s  date=%s  has_media=%s  text_len=%d",
-            len(new_msgs), message_ids, first.date.date(), payload["has_media"], len(text),
+            "Queued seq=%d  %d msg(s) ids=%s  date=%s  has_media=%s  text_len=%d",
+            self._seq, len(new_msgs), message_ids, first.date.date(), payload["has_media"], len(text),
         )
+        self._seq += 1
 

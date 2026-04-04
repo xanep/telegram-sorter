@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import asyncio
+import heapq
 import logging
+import time
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -25,7 +26,21 @@ class RouterService:
 
     ``forward_messages(..., drop_author=True)`` suppresses the
     "Forwarded from" header so posts appear native in the destination channel.
+
+    Strict ordering
+    ---------------
+    The listener stamps every queued group with a monotonic ``seq`` number.
+    The classifier passes it through unchanged.  Here we buffer arriving
+    payloads in a min-heap keyed by ``seq`` and only forward the head when
+    its ``seq`` equals ``_next_seq``.  If the next expected seq has not
+    arrived within ``_REORDER_WINDOW`` seconds we log a warning and skip
+    ahead, preventing a single stalled message from blocking the pipeline.
     """
+
+    # Seconds to wait for a missing seq before skipping ahead.
+    _REORDER_WINDOW: float = 30.0
+    # Redis read timeout (ms) — short so gap-timeout checks run frequently.
+    _READ_TIMEOUT_MS: int = 1_000
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -40,6 +55,11 @@ class RouterService:
             group=config.redis.consumer_group,
             consumer_name="router",
         )
+        # Strict-ordering state
+        self._next_seq: int = 0
+        self._heap: list[tuple[int, int, dict]] = []  # (seq, insertion_order, payload)
+        self._heap_ctr: int = 0        # tie-breaker so heapq never compares dicts
+        self._gap_since: float | None = None  # monotonic time when gap first noticed
 
     def _resolve_channel(self, category: str) -> CategoryConfig | None:
         return self.config.category_map.get(category)
@@ -64,6 +84,44 @@ class RouterService:
             logger.error("forward_messages failed: %s", exc)
             return False
 
+    async def _route(self, payload: dict) -> None:
+        """Forward one classified payload to its destination channel."""
+        category: str = payload["category"]
+        message_ids: list[int] = payload["message_ids"]
+        seq: int = payload.get("seq", -1)
+
+        cat_cfg = self._resolve_channel(category)
+
+        if cat_cfg is not None and cat_cfg.is_configured:
+            ok = await self._forward(cat_cfg.channel_id, message_ids)
+            if ok:
+                logger.info(
+                    "Routed seq=%d  %d msg(s) %s  →  %s (%s)",
+                    seq, len(message_ids), message_ids, category, cat_cfg.channel_id,
+                )
+        else:
+            unc_id = self.config.classification.uncategorized_channel_id
+            if self.config.classification.uncategorized_is_configured:
+                ok = await self._forward(unc_id, message_ids)
+                if ok:
+                    logger.info(
+                        "Routed seq=%d  %d msg(s) %s  →  Uncategorized (%s)",
+                        seq, len(message_ids), message_ids, unc_id,
+                    )
+            else:
+                logger.warning(
+                    "No channel configured for category '%s'; seq=%d msg=%s dropped.",
+                    category, seq, message_ids,
+                )
+
+    async def _drain(self) -> None:
+        """Forward all consecutive payloads from the heap starting at _next_seq."""
+        while self._heap and self._heap[0][0] == self._next_seq:
+            _, _, payload = heapq.heappop(self._heap)
+            await self._route(payload)
+            self._next_seq += 1
+            self._gap_since = None
+
     async def run(self) -> None:
         await self._queue.connect()
         await self.client.start()
@@ -79,33 +137,36 @@ class RouterService:
             self.config.redis.classified_stream,
         )
 
-        async for _redis_id, payload in self._queue.consume(self.config.redis.block_ms):
-            category: str = payload["category"]
-            message_ids: list[int] = payload["message_ids"]
+        while True:
+            payload = await self._queue.read_one(timeout_ms=self._READ_TIMEOUT_MS)
 
-            cat_cfg = self._resolve_channel(category)
+            if payload is not None:
+                # seq defaults to _next_seq for payloads from before this feature
+                seq: int = payload.get("seq", self._next_seq)
+                heapq.heappush(self._heap, (seq, self._heap_ctr, payload))
+                self._heap_ctr += 1
 
-            if cat_cfg is not None and cat_cfg.is_configured:
-                ok = await self._forward(cat_cfg.channel_id, message_ids)
-                if ok:
-                    logger.info(
-                        "Routed %d msg(s) %s  →  %s (%s)",
-                        len(message_ids), message_ids, category, cat_cfg.channel_id,
+            # Check whether a gap has been waiting too long
+            if self._heap and self._heap[0][0] > self._next_seq:
+                now = time.monotonic()
+                if self._gap_since is None:
+                    self._gap_since = now
+                    logger.debug(
+                        "Ordering gap: waiting for seq=%d, earliest buffered=%d",
+                        self._next_seq, self._heap[0][0],
                     )
-            else:
-                unc_id = self.config.classification.uncategorized_channel_id
-                if self.config.classification.uncategorized_is_configured:
-                    ok = await self._forward(unc_id, message_ids)
-                    if ok:
-                        logger.info(
-                            "Routed %d msg(s) %s  →  Uncategorized (%s)",
-                            len(message_ids), message_ids, unc_id,
-                        )
-                else:
+                elif now - self._gap_since >= self._REORDER_WINDOW:
+                    skipped = self._heap[0][0] - self._next_seq
                     logger.warning(
-                        "No channel configured for category '%s'; msg=%s dropped.",
-                        category, message_ids,
+                        "Reorder timeout after %.0fs: skipping %d missing seq(s) (%d → %d)",
+                        self._REORDER_WINDOW, skipped, self._next_seq, self._heap[0][0],
                     )
+                    self._next_seq = self._heap[0][0]
+                    self._gap_since = None
+            else:
+                self._gap_since = None
+
+            await self._drain()
 
     async def close(self) -> None:
         await self._queue.close()
