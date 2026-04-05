@@ -8,7 +8,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from src.config import AppConfig, CategoryConfig
-from src.queue_client import RedisQueue
+from src.queue_client import RedisQueue, RedisState
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,7 @@ class RouterService:
             group=config.redis.consumer_group,
             consumer_name="router",
         )
+        self._state = RedisState(url=config.redis.url)
         # Strict-ordering state
         self._next_seq: int = 0
         self._heap: list[tuple[int, int, dict]] = []  # (seq, insertion_order, payload)
@@ -90,11 +91,20 @@ class RouterService:
         message_ids: list[int] = payload["message_ids"]
         seq: int = payload.get("seq", -1)
 
+        # Dedup guard: skip messages already forwarded (protects against
+        # catch-up re-runs caused by accidental FLUSHALL or restart races).
+        if await self._state.is_already_forwarded(message_ids):
+            logger.warning(
+                "Duplicate suppressed seq=%d msg=%s — already forwarded.", seq, message_ids
+            )
+            return
+
         cat_cfg = self._resolve_channel(category)
 
         if cat_cfg is not None and cat_cfg.is_configured:
             ok = await self._forward(cat_cfg.channel_id, message_ids)
             if ok:
+                await self._state.mark_forwarded(message_ids)
                 logger.info(
                     "Routed seq=%d  %d msg(s) %s  →  %s (%s)",
                     seq, len(message_ids), message_ids, category, cat_cfg.channel_id,
@@ -104,6 +114,7 @@ class RouterService:
             if self.config.classification.uncategorized_is_configured:
                 ok = await self._forward(unc_id, message_ids)
                 if ok:
+                    await self._state.mark_forwarded(message_ids)
                     logger.info(
                         "Routed seq=%d  %d msg(s) %s  →  Uncategorized (%s)",
                         seq, len(message_ids), message_ids, unc_id,
@@ -124,6 +135,7 @@ class RouterService:
 
     async def run(self) -> None:
         await self._queue.connect()
+        await self._state.connect()
         await self.client.start()
 
         # Resolve and cache the source channel entity so Telethon knows its
@@ -170,5 +182,6 @@ class RouterService:
 
     async def close(self) -> None:
         await self._queue.close()
+        await self._state.close()
         await self.client.disconnect()
 

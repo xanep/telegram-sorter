@@ -132,7 +132,25 @@ class RedisState:
     Used by the listener to persist the high-watermark message ID so that
     a restart can resume from where it left off instead of replaying all
     messages from the last day.
+
+    Also used by the router to track recently-forwarded source message IDs
+    (dedup guard) so that a FLUSHALL or other operational mistake cannot
+    cause the same message to be posted to a destination channel twice.
+
+    IMPORTANT — safe queue flush command
+    -------------------------------------
+    To clear only the stream data (e.g. after a format change) without
+    losing state, delete the stream keys individually:
+
+        docker exec redis-sorter redis-cli DEL telegram:messages telegram:classified
+
+    Never use FLUSHALL — it erases sorter:last_processed_id and the
+    forwarded-ID set, which causes the next catch-up to re-forward everything.
     """
+
+    # Prefix for per-message dedup keys; TTL keeps Redis tidy.
+    _FWD_PREFIX = "sorter:fwd:"
+    _FWD_TTL_SECONDS = 7 * 86_400  # 7 days
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -153,6 +171,20 @@ class RedisState:
         if current is None or value > current:
             await self._client.set(key, str(value))
             logger.debug("State %s ← %d", key, value)
+
+    async def is_already_forwarded(self, msg_ids: list[int]) -> bool:
+        """Return True if ANY of the source message IDs was already forwarded."""
+        keys = [f"{self._FWD_PREFIX}{mid}" for mid in msg_ids]
+        results = await self._client.mget(*keys)
+        return any(r is not None for r in results)
+
+    async def mark_forwarded(self, msg_ids: list[int]) -> None:
+        """Record source message IDs as forwarded (with a 7-day TTL)."""
+        pipe = self._client.pipeline()
+        for mid in msg_ids:
+            pipe.set(f"{self._FWD_PREFIX}{mid}", "1", ex=self._FWD_TTL_SECONDS)
+        await pipe.execute()
+        logger.debug("Marked forwarded: %s", msg_ids)
 
     async def close(self) -> None:
         if self._client:
